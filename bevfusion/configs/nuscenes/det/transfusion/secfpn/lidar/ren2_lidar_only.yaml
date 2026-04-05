@@ -1,0 +1,194 @@
+# configs/nuscenes/det/transfusion/secfpn/lidar/ren2_lidar_only.yaml
+#
+# 针对 ren2-obs.bag 自定义数据集的 LiDAR-only 训练配置
+# 路径A：与公开 nuScenes 预训练模型对齐，可直接 load_from 加载权重
+#
+# sparse_shape 计算:
+#   x: ceil(108/0.075) = 1440
+#   y: ceil(108/0.075) = 1440
+#   z: ceil(8/0.2)+1   = 41
+
+_base_: voxelnet_0p075.yaml
+
+# ── 数据集 ──────────────────────────────────────────────────
+dataset_root: data/
+
+# ── 检测类别 ─────────────────────────────────────────────────
+object_classes:
+  - pedestrian
+
+# ── 点云范围：与公开模型对齐（路径A）────────────────────────
+point_cloud_range: [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+
+# ── 体素大小：与公开模型对齐 ─────────────────────────────────
+voxel_size: [0.075, 0.075, 0.2]
+
+# ── 训练轮数 ─────────────────────────────────────────────────
+max_epochs: 20
+
+# ── 模型：sparse_shape 与公开模型一致，可直接复用预训练权重 ──
+model:
+  encoders:
+    lidar:
+      voxelize:
+        point_cloud_range: ${point_cloud_range}
+        voxel_size: ${voxel_size}
+        max_num_points: 10
+        max_voxels: [120000, 160000]
+      backbone:
+        type: SparseEncoder
+        in_channels: 5
+        sparse_shape: [1440, 1440, 41]
+        output_channels: 128
+        order:
+          - conv
+          - norm
+          - act
+        encoder_channels:
+          - [16, 16, 32]
+          - [32, 32, 64]
+          - [64, 64, 128]
+          - [128, 128]
+        encoder_paddings:
+          - [0, 0, 1]
+          - [0, 0, 1]
+          - [0, 0, [1, 1, 0]]
+          - [0, 0]
+        block_type: basicblock
+  heads:
+    object:
+      num_classes: 1
+      train_cfg:
+        grid_size: [1440, 1440, 1]
+        point_cloud_range: ${point_cloud_range}
+        voxel_size: ${voxel_size}
+        out_size_factor: 8
+        gaussian_overlap: 0.1
+        min_radius: 2
+      test_cfg:
+        dataset: custom
+        grid_size: [1440, 1440, 1]
+        out_size_factor: 8
+        voxel_size: ${voxel_size[:2]}
+        pc_range: ${point_cloud_range[:2]}
+        nms_type: null
+
+# ── 数据 Pipeline（纯 LiDAR，去除所有相机相关步骤）──────────
+train_pipeline:
+  - type: LoadPointsFromFile
+    coord_type: LIDAR
+    load_dim: 5
+    use_dim: 5
+  - type: LoadPointsFromMultiSweeps
+    sweeps_num: 9
+    load_dim: 5
+    use_dim: 5
+    pad_empty_sweeps: true
+    remove_close: true
+  - type: LoadAnnotations3D
+    with_bbox_3d: true
+    with_label_3d: true
+    with_attr_label: false
+  - type: GlobalRotScaleTrans
+    resize_lim: [0.9, 1.1]
+    rot_lim: [-0.78539816, 0.78539816]
+    trans_lim: 0.5
+    is_train: true
+  - type: RandomFlip3D
+  - type: PointsRangeFilter
+    point_cloud_range: ${point_cloud_range}
+  - type: ObjectRangeFilter
+    point_cloud_range: ${point_cloud_range}
+  - type: ObjectNameFilter
+    classes: ${object_classes}
+  - type: PointShuffle
+  - type: DefaultFormatBundle3D
+    classes: ${object_classes}
+  - type: Collect3D
+    keys:
+      - points
+      - gt_bboxes_3d
+      - gt_labels_3d
+    meta_keys:
+      - lidar2ego
+      - lidar_aug_matrix
+
+test_pipeline:
+  - type: LoadPointsFromFile
+    coord_type: LIDAR
+    load_dim: 5
+    use_dim: 5
+  - type: LoadPointsFromMultiSweeps
+    sweeps_num: 9
+    load_dim: 5
+    use_dim: 5
+    pad_empty_sweeps: true
+    remove_close: true
+  - type: GlobalRotScaleTrans
+    resize_lim: [1.0, 1.0]
+    rot_lim: [0.0, 0.0]
+    trans_lim: 0.0
+    is_train: false
+  - type: PointsRangeFilter
+    point_cloud_range: ${point_cloud_range}
+  - type: DefaultFormatBundle3D
+    classes: ${object_classes}
+  - type: Collect3D
+    keys:
+      - points
+    meta_keys:
+      - lidar2ego
+      - lidar_aug_matrix
+
+# ── 数据集配置 ───────────────────────────────────────────────
+data:
+  samples_per_gpu: 2      # 小数据集建议从 2 开始，OOM 时降为 1
+  workers_per_gpu: 4
+  train:
+    type: NuScenesDataset
+    dataset: ~
+    dataset_root: ${dataset_root}
+    ann_file: ${dataset_root + "nuscenes_infos_train.pkl"}
+    pipeline: ${train_pipeline}
+    object_classes: ${object_classes}
+    modality:
+      use_lidar: true
+      use_camera: false
+      use_radar: false
+      use_map: false
+      use_external: false
+    test_mode: false
+    use_valid_flag: true
+    box_type_3d: LiDAR
+  val:
+    type: NuScenesDataset
+    dataset_root: ${dataset_root}
+    ann_file: ${dataset_root + "nuscenes_infos_val.pkl"}
+    pipeline: ${test_pipeline}
+    object_classes: ${object_classes}
+    modality:
+      use_lidar: true
+      use_camera: false
+      use_radar: false
+      use_map: false
+      use_external: false
+    test_mode: true
+    box_type_3d: LiDAR
+  test:
+    type: NuScenesDataset
+    dataset_root: ${dataset_root}
+    ann_file: ${dataset_root + "nuscenes_infos_val.pkl"}
+    pipeline: ${test_pipeline}
+    object_classes: ${object_classes}
+    modality:
+      use_lidar: true
+      use_camera: false
+      use_radar: false
+      use_map: false
+      use_external: false
+    test_mode: true
+    box_type_3d: LiDAR
+
+evaluation:
+  interval: 100   # 训练期间不做中间评估，训完后手动运行 tools/test.py
+  pipeline: ${test_pipeline}
